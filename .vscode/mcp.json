@@ -1,0 +1,16 @@
+{
+	"servers": {
+		"arango-mcp": {
+			"type": "stdio",
+			"command": "node",
+            "args": ["${workspaceFolder}/mcp-server-arangodb/build/index.js"],
+			"env": {
+				"ARANGO_URL": "http://lsdiedb39c.pagekite.me",
+				"ARANGO_DB": "newsDB2022",
+				"ARANGO_USERNAME": "root",
+				"ARANGO_PASSWORD": "i-0172f1f969c7548c4"
+			}
+		}
+	}
+}
+

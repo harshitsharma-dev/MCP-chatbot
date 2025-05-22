@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chatbot with MCP + ChatGPT</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    #chat-container { max-width: 600px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px #ccc; padding: 24px; }
+    #messages { min-height: 300px; margin-bottom: 16px; }
+    .msg { margin: 8px 0; }
+    .user { color: #1976d2; }
+    .bot { color: #388e3c; }
+    #input-form { display: flex; }
+    #user-input { flex: 1; padding: 8px; font-size: 1em; }
+    #send-btn { padding: 8px 16px; font-size: 1em; }
+    #mcp-btn { padding: 8px 16px; font-size: 1em; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <div id="chat-container">
+    <h2>Chatbot (MCP + ChatGPT)</h2>
+    <div id="messages"></div>
+    <form id="input-form">
+      <input id="user-input" autocomplete="off" placeholder="Type your message..." />
+      <button id="send-btn" type="submit">Send</button>
+    </form>
+    <button id="mcp-btn" type="button">Call MCP: get_system_time</button>
+  </div>
+  <script>
+    const messagesDiv = document.getElementById('messages');
+    const form = document.getElementById('input-form');
+    const input = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    let chatHistory = [], isWaiting = false;
+    let pendingToolCall = null;
+    let pendingToolArgs = null;
+    let pendingToolName = null;
+    let pendingToolDesc = null;
+    let pendingToolParams = null;
+    let lastToolInput = null;
+    let lastToolOutput = null;
+
+    // Helper to append a message to the chat
+    function appendMessage(role, text) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + (role === 'user' ? 'user' : 'bot');
+      div.textContent = (role === 'user' ? 'You: ' : 'Bot: ') + text;
+      messagesDiv.appendChild(div);
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    // Add dropdown for tool call review
+    const toolReviewDiv = document.createElement('div');
+    toolReviewDiv.id = 'tool-review';
+    toolReviewDiv.style.display = 'none';
+    toolReviewDiv.style.margin = '16px 0';
+    toolReviewDiv.style.padding = '12px';
+    toolReviewDiv.style.background = '#f9f9f9';
+    toolReviewDiv.style.border = '1px solid #ccc';
+    toolReviewDiv.style.borderRadius = '6px';
+    toolReviewDiv.innerHTML = '';
+    document.getElementById('chat-container').insertBefore(toolReviewDiv, messagesDiv);
+
+    async function handleToolCall(toolName, toolDesc, toolParams, toolArgs) {
+      pendingToolCall = toolName;
+      pendingToolArgs = toolArgs;
+      pendingToolName = toolName;
+      pendingToolDesc = toolDesc;
+      pendingToolParams = toolParams;
+      lastToolInput = toolArgs;
+      toolReviewDiv.innerHTML = `<b>Tool to run:</b> <span style='color:#1976d2'>${toolName}</span><br><b>Description:</b> ${toolDesc}<br><b>Parameters:</b> <pre>${JSON.stringify(toolParams, null, 2)}</pre><b>Arguments:</b> <pre>${JSON.stringify(toolArgs, null, 2)}</pre><button id='tool-confirm-btn'>Continue</button>`;
+      toolReviewDiv.style.display = 'block';
+      input.disabled = true;
+      sendBtn.disabled = true;
+      document.getElementById('tool-confirm-btn').onclick = async () => {
+        toolReviewDiv.innerHTML += '<div>Running tool...</div>';
+        const res = await fetch('/api/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ method: 'tools/call', params: { name: toolName, arguments: toolArgs } })
+        });
+        const data = await res.json();
+        lastToolOutput = data.result;
+        toolReviewDiv.innerHTML += `<div><b>Tool Output:</b><pre>${JSON.stringify(data.result, null, 2)}</pre></div>`;
+        // Optionally, send tool output to OpenAI for final answer
+        const followup = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [
+            { role: 'system', content: 'You are an assistant. Here is the tool output. Summarize or explain it for the user.' },
+            { role: 'user', content: `Tool: ${toolName}\nInput: ${JSON.stringify(toolArgs)}\nOutput: ${JSON.stringify(data.result)}` }
+          ] })
+        });
+        const followupData = await followup.json();
+        appendMessage('bot', followupData.reply || '[No reply]');
+        toolReviewDiv.style.display = 'none';
+        input.disabled = false;
+        sendBtn.disabled = false;
+        input.focus();
+        isWaiting = false;
+      };
+    }
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      if (isWaiting) return;
+      const userMsg = input.value.trim();
+      if (!userMsg) return;
+      appendMessage('user', userMsg);
+      chatHistory.push({ role: 'user', content: userMsg });
+      input.value = '';
+      appendMessage('bot', '...');
+      isWaiting = true;
+      input.disabled = true;
+      sendBtn.disabled = true;
+      toolReviewDiv.style.display = 'none';
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: chatHistory })
+        });
+        const data = await res.json();
+        // Detect if the reply is a tool call request (special format)
+        if (data.reply && data.reply.startsWith('[TOOL_CALL]')) {
+          // Parse tool call info
+          const toolInfo = JSON.parse(data.reply.replace('[TOOL_CALL]', ''));
+          await handleToolCall(toolInfo.name, toolInfo.description, toolInfo.parameters, toolInfo.arguments);
+        } else {
+          messagesDiv.lastChild.textContent = 'Bot: ' + (data.reply || '[No reply]');
+          chatHistory.push({ role: 'assistant', content: data.reply });
+          isWaiting = false;
+          input.disabled = false;
+          sendBtn.disabled = false;
+          input.focus();
+        }
+      } catch {
+        messagesDiv.lastChild.textContent = 'Bot: [Error]';
+        isWaiting = false;
+        input.disabled = false;
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    };
+
+    document.getElementById('mcp-btn').onclick = async () => {
+      appendMessage('user', '[MCP] get_system_time');
+      appendMessage('bot', '...');
+      try {
+        const res = await fetch('/api/mcp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ method: 'get_system_time', params: {} })
+        });
+        const data = await res.json();
+        messagesDiv.lastChild.textContent = 'Bot: ' + (data.result || '[No reply]');
+      } catch {
+        messagesDiv.lastChild.textContent = 'Bot: [MCP error]';
+      }
+    };
+  </script>
+</body>
+</html>
