@@ -1,4 +1,4 @@
-// test_chat.js
+// test_chat_v3.js
 require('dotenv').config();
 const { ChatOpenAI } = require("@langchain/openai");
 const { HumanMessage, SystemMessage } = require("@langchain/core/messages");
@@ -14,19 +14,7 @@ const env = {
   ARANGO_PASSWORD: "i-0172f1f969c7548c4"
 };
 
-console.log('[Test] Starting MCP server...');
-const mcp = spawn('node', [path.join('mcp-server-arangodb', 'build', 'index.js')], {
-  env,
-  stdio: ['pipe', 'pipe', 'pipe']
-});
-
-mcp.stderr.on('data', data => {
-  console.error('[MCP stderr]', data.toString());
-  // If we see the server startup message, call main()
-  if (data.toString().includes('ArangoDB MCP server running')) {
-    main();
-  }
-});
+let mcp;
 
 // Helper to call MCP tool
 async function callMcpTool(toolName, toolArgs) {
@@ -48,7 +36,8 @@ async function callMcpTool(toolName, toolArgs) {
         mcp.stdout.removeListener('data', responseHandler);
         resolve(resp.result);
       } catch (e) {
-        // Not complete JSON yet, keep buffering
+        // Not complete JSON yet
+        console.log('[Test] Buffering tool response:', data);
       }
     };
 
@@ -77,8 +66,8 @@ async function getMcpTools() {
         mcp.stdout.removeListener('data', responseHandler);
         resolve(resp.result.tools || []);
       } catch (e) {
-        // Not complete JSON yet, continue buffering
-        console.log('[Test] Buffering:', data);
+        // Not complete JSON yet
+        console.log('[Test] Buffering tools response:', data);
       }
     };
 
@@ -87,7 +76,29 @@ async function getMcpTools() {
   });
 }
 
-async function main() {  try {
+async function main() {
+  try {
+    // Start MCP server
+    console.log('[Test] Starting MCP server...');
+    mcp = spawn('node', [path.join('mcp-server-arangodb', 'build', 'index.js')], {
+      env,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    mcp.stderr.on('data', data => {
+      console.error('[MCP stderr]', data.toString());
+    });
+
+    // Wait for server to start
+    await new Promise((resolve, reject) => {
+      mcp.stderr.once('data', (data) => {
+        if (data.toString().includes('ArangoDB MCP server running')) {
+          resolve();
+        }
+      });
+      setTimeout(() => reject(new Error('Timeout waiting for MCP server')), 5000);
+    });
+
     // Get available tools
     console.log('[Test] Fetching available tools...');
     const tools = await getMcpTools();
@@ -106,27 +117,66 @@ async function main() {  try {
       parameters: tool.parameters || { type: "object", properties: {} }
     }));
 
-    // System prompt with tool descriptions
-    const systemPrompt = new SystemMessage(
-      "You are an AI assistant with access to MCP tools. Here are the available tools:\n\n" +
-      tools.map(t => `Tool: ${t.name}\nDescription: ${t.description || 'No description'}\nParameters: ${JSON.stringify(t.parameters || {})}`).join("\n\n") +
-      "\n\nUse tools when needed. If a tool requires parameters, ask the user or infer from context."
-    );
-
     // Test with request for 5 recent articles
     const userInput = "Get me 5 recent articles with their authors and categories";
     console.log('\n[Test] User request:', userInput);
 
-    // Get tool call from ChatGPT
-    console.log('[Test] Sending request to ChatGPT...');    const result = await llm.invoke([systemPrompt, new HumanMessage(userInput)], {
-      functions,
-      function_call: "auto"
+    // First test - direct tool call to verify MCP communication
+    console.log('\n[Test] Step 1: Direct MCP tool call...');
+    const directResult = await callMcpTool('flexible_recent_articles', {
+      limit: 5,
+      detail: 'summary',
+      withRelated: ['authors', 'categories']
+    });
+    console.log('[Test] Direct tool result:', JSON.stringify(directResult, null, 2));
+
+    // Now test ChatGPT integration
+    console.log('\n[Test] Step 2: Testing ChatGPT integration...');
+    const messages = [
+      {
+        role: 'system',
+        content: 'You are an AI assistant with access to ArangoDB MCP tools. Use the flexible_recent_articles tool to get recent articles.'
+      },
+      {
+        role: 'user',
+        content: userInput
+      }
+    ];
+
+    const result = await llm.call(messages, {
+      functions: [{
+        name: "flexible_recent_articles",
+        description: "Return articles with full flexibility: pagination, sorting, detail, related data, etc.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Maximum number of articles to return",
+              default: 10
+            },
+            detail: {
+              type: "string",
+              enum: ["minimal", "summary", "full"],
+              default: "summary",
+              description: "Level of detail"
+            },
+            withRelated: {
+              type: "array",
+              items: { type: "string" },
+              description: "Related data to include",
+              optional: true
+            }
+          }
+        }
+      }],
+      function_call: { name: "flexible_recent_articles" }
     });
 
-    console.log('[Test] ChatGPT response:', result);
+    console.log('[Test] ChatGPT response:', JSON.stringify(result, null, 2));
 
-    // Execute tool call if requested
-    if (result.additional_kwargs.function_call) {
+    // Execute tool call
+    if (result.additional_kwargs?.function_call) {
       const { name, arguments: argsStr } = result.additional_kwargs.function_call;
       const args = JSON.parse(argsStr);
       console.log(`[Test] ChatGPT wants to call ${name} with args:`, args);
@@ -137,8 +187,8 @@ async function main() {  try {
 
       // Let ChatGPT summarize the result
       const summary = await llm.invoke([
-        systemPrompt,
-        new HumanMessage(`Tool: ${name}\nInput: ${argsStr}\nOutput: ${JSON.stringify(toolResult)}\nSummarize this result for the user.`)
+        new SystemMessage('You are a helpful assistant. Summarize the article information in a clear way.'),
+        new HumanMessage(`Here are the recent articles: ${JSON.stringify(toolResult)}\nPlease summarize them briefly.`)
       ]);
 
       console.log('[Test] Summary:', summary.content);
@@ -147,15 +197,23 @@ async function main() {  try {
     }
   } catch (error) {
     console.error('[Test] Error:', error);
+    console.error(error.stack);
   } finally {
-    // Clean up
-    mcp.kill();
+    if (mcp) {
+      mcp.kill();
+    }
     process.exit(0);
   }
 }
 
 process.on('unhandledRejection', error => {
   console.error('Unhandled Promise Rejection:', error);
-  mcp.kill();
+  console.error(error.stack);
+  if (mcp) {
+    mcp.kill();
+  }
   process.exit(1);
 });
+
+// Start the test
+main();

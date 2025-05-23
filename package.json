@@ -1,5 +1,7 @@
 {
+  "type": "module",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@langchain/core": "^0.3.57",
     "@langchain/openai": "^0.5.11",
     "arango-server": "^0.4.4",

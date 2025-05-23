@@ -1,4 +1,4 @@
-// test_chat.js
+// test_chat_v2.js
 require('dotenv').config();
 const { ChatOpenAI } = require("@langchain/openai");
 const { HumanMessage, SystemMessage } = require("@langchain/core/messages");
@@ -14,19 +14,7 @@ const env = {
   ARANGO_PASSWORD: "i-0172f1f969c7548c4"
 };
 
-console.log('[Test] Starting MCP server...');
-const mcp = spawn('node', [path.join('mcp-server-arangodb', 'build', 'index.js')], {
-  env,
-  stdio: ['pipe', 'pipe', 'pipe']
-});
-
-mcp.stderr.on('data', data => {
-  console.error('[MCP stderr]', data.toString());
-  // If we see the server startup message, call main()
-  if (data.toString().includes('ArangoDB MCP server running')) {
-    main();
-  }
-});
+let mcp;
 
 // Helper to call MCP tool
 async function callMcpTool(toolName, toolArgs) {
@@ -48,7 +36,7 @@ async function callMcpTool(toolName, toolArgs) {
         mcp.stdout.removeListener('data', responseHandler);
         resolve(resp.result);
       } catch (e) {
-        // Not complete JSON yet, keep buffering
+        // Not complete JSON yet
       }
     };
 
@@ -77,7 +65,7 @@ async function getMcpTools() {
         mcp.stdout.removeListener('data', responseHandler);
         resolve(resp.result.tools || []);
       } catch (e) {
-        // Not complete JSON yet, continue buffering
+        // Not complete JSON yet
         console.log('[Test] Buffering:', data);
       }
     };
@@ -87,7 +75,29 @@ async function getMcpTools() {
   });
 }
 
-async function main() {  try {
+async function main() {
+  try {
+    // Start MCP server
+    console.log('[Test] Starting MCP server...');
+    mcp = spawn('node', [path.join('mcp-server-arangodb', 'build', 'index.js')], {
+      env,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    mcp.stderr.on('data', data => {
+      console.error('[MCP stderr]', data.toString());
+    });
+
+    // Wait for server to start
+    await new Promise((resolve, reject) => {
+      mcp.stderr.once('data', (data) => {
+        if (data.toString().includes('ArangoDB MCP server running')) {
+          resolve();
+        }
+      });
+      setTimeout(() => reject(new Error('Timeout waiting for MCP server')), 5000);
+    });
+
     // Get available tools
     console.log('[Test] Fetching available tools...');
     const tools = await getMcpTools();
@@ -108,27 +118,28 @@ async function main() {  try {
 
     // System prompt with tool descriptions
     const systemPrompt = new SystemMessage(
-      "You are an AI assistant with access to MCP tools. Here are the available tools:\n\n" +
+      "You are an AI assistant with access to ArangoDB MCP tools. Here are the available tools:\n\n" +
       tools.map(t => `Tool: ${t.name}\nDescription: ${t.description || 'No description'}\nParameters: ${JSON.stringify(t.parameters || {})}`).join("\n\n") +
-      "\n\nUse tools when needed. If a tool requires parameters, ask the user or infer from context."
+      "\n\nUse tools to fetch data when needed. For recent articles, use the flexible_recent_articles tool."
     );
 
     // Test with request for 5 recent articles
     const userInput = "Get me 5 recent articles with their authors and categories";
-    console.log('\n[Test] User request:', userInput);
-
-    // Get tool call from ChatGPT
-    console.log('[Test] Sending request to ChatGPT...');    const result = await llm.invoke([systemPrompt, new HumanMessage(userInput)], {
-      functions,
-      function_call: "auto"
+    console.log('\n[Test] User request:', userInput);    // Get tool call from ChatGPT
+    console.log('[Test] Sending request to ChatGPT...');
+    console.log('[Test] Functions:', JSON.stringify(functions, null, 2));
+    const result = await llm.call([systemPrompt, new HumanMessage(userInput)], {
+      tools: functions,
+      tool_choice: "auto"
     });
+    console.log('[Test] Raw response:', JSON.stringify(result, null, 2));
 
     console.log('[Test] ChatGPT response:', result);
 
     // Execute tool call if requested
-    if (result.additional_kwargs.function_call) {
-      const { name, arguments: argsStr } = result.additional_kwargs.function_call;
-      const args = JSON.parse(argsStr);
+    if (result.tool_calls && result.tool_calls.length > 0) {
+      const toolCall = result.tool_calls[0];
+      const { name, args } = toolCall;
       console.log(`[Test] ChatGPT wants to call ${name} with args:`, args);
 
       // Call the tool
@@ -138,7 +149,7 @@ async function main() {  try {
       // Let ChatGPT summarize the result
       const summary = await llm.invoke([
         systemPrompt,
-        new HumanMessage(`Tool: ${name}\nInput: ${argsStr}\nOutput: ${JSON.stringify(toolResult)}\nSummarize this result for the user.`)
+        new HumanMessage(`Tool: ${name}\nInput: ${JSON.stringify(args)}\nOutput: ${JSON.stringify(toolResult)}\nSummarize this result for the user.`)
       ]);
 
       console.log('[Test] Summary:', summary.content);
@@ -148,14 +159,20 @@ async function main() {  try {
   } catch (error) {
     console.error('[Test] Error:', error);
   } finally {
-    // Clean up
-    mcp.kill();
+    if (mcp) {
+      mcp.kill();
+    }
     process.exit(0);
   }
 }
 
 process.on('unhandledRejection', error => {
   console.error('Unhandled Promise Rejection:', error);
-  mcp.kill();
+  if (mcp) {
+    mcp.kill();
+  }
   process.exit(1);
 });
+
+// Start the test
+main();

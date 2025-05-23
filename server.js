@@ -1,10 +1,8 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-require('dotenv').config();
 const { spawn } = require('child_process');
 const path = require('path');
-const fs = require('fs');
-const { createChatChain } = require('./langchain_chat');
+const { createChatChain, cleanup } = require('./langchain_chat_v2');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -12,11 +10,46 @@ const PORT = process.env.PORT || 3001;
 app.use(express.static('public'));
 app.use(bodyParser.json());
 
-let mcpProcess;
-let mcpId = 1;
+// Handle chat requests
+app.post('/api/chat', async (req, res) => {
+    try {
+        if (!chatChainPromise) {
+            chatChainPromise = createChatChain();
+        }
+        
+        const chatChain = await chatChainPromise;
+        const { messages } = req.body;
+        const userInput = messages[messages.length - 1]?.content || '';
+        
+        console.log('[Server] Chat request:', userInput);
+        const reply = await chatChain.invoke(userInput);
+        console.log('[Server] Chat response:', reply);
+        
+        res.json({ reply });
+    } catch (err) {
+        console.error('[Server] Chat error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
-// Start MCP server
+// Start server
+app.listen(PORT, () => {
+    console.log(`[Server] Running on http://localhost:${PORT}`);
+});
+
+// Cleanup on shutdown
+process.on('SIGINT', () => {
+    cleanup();
+    process.exit();
+});
+
+process.on('SIGTERM', () => {
+    cleanup();
+    process.exit();
+});
+
 function startMcpServer() {
+  console.log('[Server] Starting MCP server...');
   mcpProcess = spawn('node', [
     path.join(__dirname, 'mcp-server-arangodb', 'build', 'index.js')
   ], {
@@ -31,12 +64,15 @@ function startMcpServer() {
   });
 
   mcpProcess.stderr.on('data', data => {
-    console.error('[MCP stderr]', data.toString());
+    console.log('[MCP stderr]', data.toString());
+  });
+
+  mcpProcess.stdout.on('data', data => {
+    console.log('[MCP stdout]', data.toString());
   });
 
   mcpProcess.on('exit', (code) => {
     console.log('[MCP] Server exited with code:', code);
-    // Restart MCP server if it crashes
     if (code !== 0) {
       console.log('[MCP] Restarting server...');
       startMcpServer();
@@ -71,7 +107,7 @@ function sendMcpRequest(method, params) {
           }
         }
       } catch (e) {
-        // Not complete JSON yet, keep buffering
+        // Not complete JSON yet, continue buffering
       }
     };
 
@@ -96,13 +132,13 @@ app.post('/api/chat', async (req, res) => {
     const { messages } = req.body;
     const userInput = messages[messages.length - 1]?.content || '';
     
-    console.log('[Express] Chat request:', userInput);
+    console.log('[Server] Chat request:', userInput);
     const reply = await chatChain.invoke(userInput);
-    console.log('[Express] Chat response:', reply);
+    console.log('[Server] Chat response:', reply);
     
     res.json({ reply });
   } catch (err) {
-    console.error('[Express] Error:', err);
+    console.error('[Server] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -111,16 +147,21 @@ app.post('/api/chat', async (req, res) => {
 app.post('/api/mcp', async (req, res) => {
   try {
     const { method, params } = req.body;
-    console.log('[Express] MCP request:', method, params);
+    console.log('[Server] MCP request:', method, params);
     const result = await sendMcpRequest(method, params);
     res.json({ result });
   } catch (err) {
-    console.error('[Express] MCP error:', err);
+    console.error('[Server] MCP error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+app.listen(PORT, async () => {
+  console.log(`[Server] Running on http://localhost:${PORT}`);
+  try {
+    await startMcpServer();
+    console.log('[Server] MCP server initialized');
+  } catch (err) {
+    console.error('[Server] Failed to start MCP server:', err);
+  }
 });

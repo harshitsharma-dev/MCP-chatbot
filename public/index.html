@@ -24,22 +24,13 @@
     <form id="input-form">
       <input id="user-input" autocomplete="off" placeholder="Type your message..." />
       <button id="send-btn" type="submit">Send</button>
-    </form>
-    <button id="mcp-btn" type="button">Call MCP: get_system_time</button>
-  </div>
+    </form>  </div>
   <script>
     const messagesDiv = document.getElementById('messages');
     const form = document.getElementById('input-form');
     const input = document.getElementById('user-input');
     const sendBtn = document.getElementById('send-btn');
     let chatHistory = [], isWaiting = false;
-    let pendingToolCall = null;
-    let pendingToolArgs = null;
-    let pendingToolName = null;
-    let pendingToolDesc = null;
-    let pendingToolParams = null;
-    let lastToolInput = null;
-    let lastToolOutput = null;
 
     // Helper to append a message to the chat
     function appendMessage(role, text) {
@@ -100,43 +91,40 @@
         input.focus();
         isWaiting = false;
       };
-    }
-
-    form.onsubmit = async (e) => {
+    }    form.onsubmit = async (e) => {
       e.preventDefault();
       if (isWaiting) return;
+      
       const userMsg = input.value.trim();
       if (!userMsg) return;
+      
       appendMessage('user', userMsg);
       chatHistory.push({ role: 'user', content: userMsg });
       input.value = '';
+      
+      // Show loading state
       appendMessage('bot', '...');
       isWaiting = true;
       input.disabled = true;
       sendBtn.disabled = true;
-      toolReviewDiv.style.display = 'none';
+      
       try {
         const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages: chatHistory })
         });
+        
         const data = await res.json();
-        // Detect if the reply is a tool call request (special format)
-        if (data.reply && data.reply.startsWith('[TOOL_CALL]')) {
-          // Parse tool call info
-          const toolInfo = JSON.parse(data.reply.replace('[TOOL_CALL]', ''));
-          await handleToolCall(toolInfo.name, toolInfo.description, toolInfo.parameters, toolInfo.arguments);
-        } else {
-          messagesDiv.lastChild.textContent = 'Bot: ' + (data.reply || '[No reply]');
+        
+        // Update chat with response
+        messagesDiv.lastChild.textContent = 'Bot: ' + (data.reply || '[No reply]');
+        if (data.reply) {
           chatHistory.push({ role: 'assistant', content: data.reply });
-          isWaiting = false;
-          input.disabled = false;
-          sendBtn.disabled = false;
-          input.focus();
         }
-      } catch {
-        messagesDiv.lastChild.textContent = 'Bot: [Error]';
+      } catch (error) {
+        console.error('Chat error:', error);
+        messagesDiv.lastChild.textContent = 'Bot: Sorry, there was an error processing your request.';
+      } finally {
         isWaiting = false;
         input.disabled = false;
         sendBtn.disabled = false;
